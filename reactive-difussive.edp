@@ -1,0 +1,61 @@
+//Galerkin P1 finite element method for the reactive-diffusive equation
+
+load "iovtk"; // Load the IOVTK module (for saving vtk files)
+
+// 1. Define the 2D square domain
+real L = 1.0; // Length of the square side
+int n = 10; // Number of elements along each side
+mesh Th = square(n, n, [x*L, y*L]); // nxn square mesh
+
+// 2. Generate the triangulation
+plot(Th, wait=true, fill=true); // Display the mesh
+//cout << "\nNumber of elements: " << Th.nt << endl;
+//cout << "\nTh[0][1]: " << Th[6][2] << endl;
+//cout << "\nTh(1):" << Th(2) << endl;
+
+// 3. Use a linear polynomial space
+fespace Vh(Th, P1); // Finite element space with P1 elements
+Vh u, v;            // Solution and test function
+
+// 4. Define \mathcal{A}, \sigma, and f
+func tensorA = 1.0; 
+func sigma = 1.0;   
+func f = 1.0;      
+
+// Define the bilinear and linear forms
+varf a(u, v) = int2d(Th)(tensorA*(dx(u)*dx(v) + dy(u)*dy(v)) + sigma*u*v)
+                + on(1, 2, 3, 4, u=0); // Dirichlet boundary conditions on all sides
+varf l(unused, v) = int2d(Th)(f*v);
+
+/*Note: The letter "L" can't be
+used as a variable because we used already at
+the beginning*/
+
+// 5. Assemble the matrix and force vector
+matrix A = a(Vh, Vh);
+real[int] F = l(0,Vh);
+
+//cout << "\nMatrix A: \n" << A << endl;
+//cout << "\nVector F: \n" << F << endl;
+
+// 6. Solve the linear system
+u[] = A^-1 * F;
+//plot(u, wait=true, fill=true, value=true);
+
+// 7. Create the directory and export the solution for paraview 
+//string dir = "solution_data";
+//system("mkdir " + dir);
+//savevtk(dir + "/solution.vtk", Th, u, dataname="u");
+
+// 8. Export the solution for Gnuplot
+
+ofstream out("mesh_solution.dat");
+for (int i = 0; i < Th.nt; i++) { // Iterate over each triangle
+    for (int j = 0; j < 3; j++) { // Iterate over the three vertices of each triangle
+        int vert = Th[i][j]; // Get the vertex index
+        out << Th(vert).x << " " << Th(vert).y << " " << u[][vert] << endl;
+    }
+    out << endl; // Empty line to separate the triangles
+}
+//out.close();
+
