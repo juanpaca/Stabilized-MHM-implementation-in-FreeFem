@@ -1,0 +1,406 @@
+//Implementation of MHM-Galerkin (without edge partition) for a reactive diffussive problem with homogeneus Dirichlet Condition
+
+//Original ideas from: Larissa Martins
+//Adaptation: Juan Pacazuca
+//2025
+
+// Load required packages and libraries
+include "getARGV.idp"
+//include "ExtractDofsonBorder.idp" 
+load "Element_P3"
+load "Element_PkEdge"
+load "iovtk"
+load "qf11to25"
+load "Element_Mixte"
+load "msh3"
+load "gmsh"
+
+//--------------------------- Macros ---------------------------
+macro grad(u) [dx(u), dy(u)] // Gradient operator
+macro normal [N.x, N.y]       // Normal vector
+
+//--------------------------- Command Line Parameters ---------------------------
+//int coarseMesh = getARGV("-cM", 3);   // Coarse mesh refinement level
+//int subMesh    = getARGV("-subM", 5); // Local mesh refinement level
+//int LkOrder    = getARGV("-LkO", 0);  // Edge space polynomial order
+//int PkOrder    = getARGV("-PkO", 0);  // Volume space polynomial order
+
+//---------------------------Parameters for the problem ----
+
+real sigmaVal = 1.0;  // Coefficient sigma
+real kappaVal = 1.0;  // Coefficient kappa
+func fFunc = (sigmaVal +  8* kappaVal * pi*pi) *sin(2*pi*x)*sin(2*pi*y); //font term for analytical solution
+int forder = 25; //Quadrature order
+
+//---------------------------Information about analytical solution---------------------------
+func uex = sin(2*pi*x)*sin(2*pi*y);
+func dxu = 2*pi*cos(2*pi*x)*sin(2*pi*y);
+func dyu = 2*pi*sin(2*pi*x)*cos(2*pi*y);
+
+
+//--------------------------- Output Directories for solution---------------------------
+
+//Activate this part of the code to save the results in a directory
+
+//string directory = "Analytical-Standard_cM"+coarseMesh+"_subM"+subMesh+"_L"+LkOrder+"K"+PkOrder;
+//exec("mkdir " + directory);
+
+//string fileparaviewPrimal = directory+"/paraview_uHh_cM"+coarseMesh+"_subM"+subMesh+"_L"+LkOrder+"K"+PkOrder;
+//exec("mkdir " + fileparaviewPrimal);
+
+//--------------------------- Output file for error data -------------------------------
+
+ofstream errorData("error_data_mhm-gaNoEdgeSP.txt");
+errorData << "# h   L2_error   H1_semi_error   H1_error" << endl;
+
+//--------------------------- Polynomial Spaces ---------------------------
+func Pm = P0edge;   // Lagrange multiplier space
+func Pk = P2;       // Local solution space
+
+//--------------------------- Mesh Refinement Loop ---------------------------
+
+//Loop over globalMesh.hmax = \mathcal{H} is mesh-based convergence
+//When we implement the edge partition we can study spaced-based convergence
+
+int subMesh = 5; // Local mesh refinement level, just fix a number
+
+for(int coarseMesh = 1 ; coarseMesh < 6; coarseMesh++){
+
+real Hcal = 1/(sqrt(2) * 2^coarseMesh); // Mesh size
+//--------------------------- Global Domain Setup ---------------------------
+mesh globalMesh = square(2^coarseMesh , 2^coarseMesh);  // Generate global mesh, for a simple test change coarseMeshSizePowerOftwo to 2^coarseMesh 
+int NbTriangles = globalMesh.nt;  // Number of elements
+int NbVertices = globalMesh.nv;   // Number of vertices
+
+//plot(globalMesh, ps="globalMesh.eps", wait=true);
+
+//--------------------------- Multiplier Space Setup ---------------------------
+fespace LambdaH(globalMesh, Pm);
+int ndofLambda= LambdaH.ndof; //dim\Lambda_H
+int ndofLambdaK = LambdaH.ndofK; //dim\Lambda_H^K
+
+//---------------------------Nodes in element K------------------------------------
+real[int,int] elemNodesGlobal(NbTriangles,3);
+for (int i = 0; i < NbTriangles; i++){
+    for(int j = 0; j < 3; j++){
+        elemNodesGlobal(i,j) = int(globalMesh[i][j]);
+    }
+}
+// cout << elemNodesGlobal <<"\n";
+
+//--------------------------- Location Matrix Setup ---------------------------
+int[int, int] LocationMatrix(NbTriangles, ndofLambdaK);
+for (int k = 0; k < NbTriangles; k++) {
+    for (int i = 0; i < ndofLambdaK; i++) {
+        LocationMatrix(k, i) = LambdaH(k, i);  // Global index for local DoF i in element k
+    }
+}
+// cout << LocationMatrix << "\n";
+
+//--------------------------- Memory Pre-allocation -------------------------------
+real[int, int] EtaF(NbTriangles, 10000);  // Local solutions for Ŷ_h f
+real[int, int] ThlambdaH(NbTriangles*ndofLambdaK , 10000);  // EtaLambda[k] stores solutions for element K
+matrix A(ndofLambda, ndofLambda);           // Global matrix for Lagrange multipliers
+real[int] eF(ndofLambda);     
+eF = 0;          
+
+
+//--------------------------- Edge Orientation Mapping ---------------------------
+int[int,int] edgeOrient(NbTriangles, 3);
+
+for (int k=0; k<NbTriangles;k++){
+    for(int i=0; i<3;i++){ 
+        int i1 = globalMesh[k][(i+1)%3];
+        int i2 = globalMesh[k][(i+2)%3];
+        int  orientation = i1 < i2 ? 1 : -1;
+        edgeOrient(k,i) =  orientation;
+    }
+}
+
+//Creating the array of meshes
+mesh[int] Th(NbTriangles);
+
+//--------------------------- Main Computation Loop ---------------------------
+for(int k=0; k<NbTriangles; k++) {
+
+    // Build local refined mesh
+    real coordX0, coordX1, coordX2;
+    real coordY0, coordY1, coordY2;
+
+    for(int i = 0; i< NbVertices; i++){
+        if(elemNodesGlobal(k,0) == i){
+            coordX0 = globalMesh(i).x;
+            coordY0 = globalMesh(i).y;
+        }
+        if(elemNodesGlobal(k,1) == i){
+            coordX1 = globalMesh(i).x;
+            coordY1 = globalMesh(i).y;
+        }
+        if(elemNodesGlobal(k,2) == i){
+            coordX2 = globalMesh(i).x;
+            coordY2 = globalMesh(i).y;
+        }
+    }
+
+    real[int, int] nodes = [[coordX0, coordY0], [coordX1,coordY1], [coordX2, coordY2]];
+
+    // Define borders with proper labeling and segmentation
+    border f0(t=0,1){P.x=nodes(2,0)*t + nodes(1,0)*(1-t);P.y=nodes(2,1)*t + nodes(1,1)*(1-t); label=11;};
+    border f1(t=0,1){P.x=nodes(0,0)*t + nodes(2,0)*(1-t);P.y=nodes(0,1)*t + nodes(2,1)*(1-t); label=22;};
+    border f2(t=0,1){P.x=nodes(1,0)*t + nodes(0,0)*(1-t);P.y=nodes(1,1)*t + nodes(0,1)*(1-t); label=33;};
+
+    // Correct buildmesh call with segment counts
+    Th[k] = buildmesh(f0(1) + f1(1) + f2(1));
+    Th[k] = trunc(Th[k], 1, split=2^subMesh);
+    
+    //plot(Th[k], ps="mesh"+k+".eps", wait=true);
+
+    int NbTrianglesLocal = Th[k].nt;
+    fespace VhK(Th[k], Pk);
+    VhK[int] etalK(ndofLambdaK); //For saving the \eta_i^h solutions
+    
+    //---------------------DOFS Information--------------------------------//
+    int ndofVhK = VhK.ndof;
+
+    //--------------------- Local Problem 1: hatT_h f ---------------------
+    //This is the local problem that depends on the f\inL^2 (\Omega)
+    VhK etafK, vLocal;
+
+    // Define bilinear form for both local problems
+    varf aLocal(etafK, vLocal) = 
+        int2d(Th[k], qforder = forder)( sigmaVal * etafK * vLocal + kappaVal * grad(etafK)' * grad(vLocal) );
+
+    // Define linear form for local problem 1
+    varf lLocal(etafK,vLocal) = 
+        int2d(Th[k] , qforder = forder)( fFunc * vLocal );
+
+    // Assemble system matrix and right-hand side
+    matrix akLocal = aLocal(VhK, VhK);
+    real[int] fkLocal = lLocal(0, VhK);
+
+    // Solve the local system ALocal * solHatf = bLocal
+    real[int] solHatf = akLocal^-1 * fkLocal;
+    etafK[] = solHatf;
+    
+    //Saving in column major order
+    EtaF(k, :) = etafK[];
+    EtaF.resize(NbTriangles, ndofVhK);
+
+    //cout << EtaF << "\n";
+
+    //--------------------- Local Problem 2: T_h lambda ---------------------
+    //In this part of the code we compute the eta_i^h multiscale functions
+    
+    
+    matrix Fklaux;
+    real[int, int] Fkl(ndofVhK,  ndofLambdaK);
+
+    VhK varphi;
+    LambdaH muhK;
+    int[int] edgeLabel = [11,22,33];
+    for(int e=0; e<3;e++){
+        varf fhKl(muhK, varphi)
+         = int1d(Th[k],edgeLabel[e])(edgeOrient(k,e)*muhK*varphi);  
+        matrix mfhKl = fhKl(LambdaH,VhK);
+
+        Fklaux = Fklaux + mfhKl;
+    }
+    // cout << Fklaux << "\n";
+
+    for(int i=0;i<ndofVhK;i++){
+        for(int j=0;j<ndofLambdaK;j++){
+            int jj = LocationMatrix(k,j);
+            Fkl(i,j) = Fklaux(i,jj);
+        }
+    }
+    // cout << Fkl << "\n";
+
+    real[int,int] rhsetal(ndofVhK, ndofLambdaK);
+    real[int,int] soletal(ndofVhK, ndofLambdaK);
+
+    // block vector RHS for each etaL
+    for(int i=0; i<ndofLambdaK; i++){
+        rhsetal(:,i) = Fkl(:,i);
+    }
+
+    //solve linear system  
+    for(int i=0; i<ndofLambdaK; i++){
+        soletal(:,i) = akLocal^-1 * rhsetal(:,i);
+    }
+
+    //set the value
+    for(int i=0; i<ndofLambdaK; i++){
+        etalK[i][] = soletal(:,i);  
+    }
+
+    //for(int i=0; i<ndofLambdaK; i++){
+    //    cout << "etaL " << i << " elem " << k << ": " << etalK[i][] << "\n";
+    //}
+
+    //Putting the local values on a matrix
+    for(int i=0; i<ndofLambdaK; i++){
+        ThlambdaH((k*ndofLambdaK)+i,:) = etalK[i][];
+    }
+    ThlambdaH.resize(NbTriangles*ndofLambdaK, ndofVhK);
+
+    //------------------------------------Building Local Matrices Ak and efK------------------------------------//
+    matrix Ak(ndofLambdaK, ndofLambdaK);
+    real[int] efK(ndofLambdaK);
+
+    //Matrix for linear combination
+    matrix MetalK(ndofLambdaK, ndofVhK);
+    matrix Mfketal = [[Fkl]]; //Coefficients of the <\psi_i^K , \phi_j>_{\partial K} terms
+    real[int] MetafK = etafK[];
+
+    //cout<< " ndofLambdaK: " << ndofLambdaK << "\n";
+    
+    for( int i = 0; i< ndofLambdaK; i++){
+        for( int j = 0; j< ndofVhK; j++){
+            MetalK(i,j) = etalK[i][][j];
+        }
+    }
+
+    //Building the local matrix Ak and vector efK
+    Ak = MetalK * Mfketal;
+    //Ak = Mfketal' * MetalK' ;
+    efK = Mfketal' * MetafK;
+    
+    //cout << "size of Ak: " << Ak.n << "x" << Ak.m << "\n";
+    //cout << "size of efK: " << efK.n << "\n";
+    //We expect to obtain a matrix of size ndofLambdaK x ndofLambdaK and a vector of size ndofLambdaK
+
+    //--------------------------------------Assembling the Global Matrix A and vector ef--------------------//
+    
+    //Assembling the global matrix A
+    for(int n=0; n<Ak.n; n++){
+        for(int m=0; m<Ak.m; m++){
+            int ii = LocationMatrix(k,n);
+            int jj = LocationMatrix(k,m);
+            A(ii,jj) = A(ii,jj) + Ak(n,m);  
+        }
+    }
+
+    //Assembling the global vector ef
+    
+        for(int m=0; m<efK.n; m++){
+            int ii = LocationMatrix(k,m);
+            eF(ii) = eF(ii) - efK(m);
+        }
+
+}
+
+//cout << "Size of A: " << A.n << "x" << A.m << "\n";
+//cout << "Size of eF: " << eF.n << "\n";
+//cout << "A: " << A << "\n";
+//cout << "eF: " << eF << "\n";
+
+//--------------------------------------Solving the Global System------------------------------------//
+LambdaH lambdaH;
+real[int] solGlobal(ndofLambda);
+
+//Solving the global system
+set(A, solver=sparsesolver);
+solGlobal = A^-1 * eF;
+
+//cout << "solGlobal:  " << solGlobal << "\n";
+lambdaH[] = solGlobal;
+
+//--------------------------------------Variables for uHh--------------------------------------------//
+real[int, int] uHhg(NbTriangles, ndofLambda); //uHh global
+
+//-----------------------------------Error estructures-----------------------------------------//
+
+//This is meant to compare the converge curves of the error
+int alloc = NbTriangles;
+real[int] L2error(alloc);
+real[int] H1semierror(alloc);
+real[int] H1error(alloc);
+
+real[int] L2errorSig(alloc);
+real[int] H1semierrorSig(alloc);
+real[int] H1errorSig(alloc);
+
+real globalSumL2 = 0, globalSumH1 = 0, globalSumH1semi = 0;
+real globalSumL2Sig = 0, globalSumH1Sig = 0, globalSumH1semiSig = 0;
+
+//--------------------------------------Constructing the solution in each K--------------------------//
+
+for(int k = 0; k < NbTriangles; k++){
+    fespace VhKaux(Th[k], Pk);
+    int ndofVhKaux = VhKaux.ndof;
+
+    real[int, int] ThlambdaHK(ndofLambdaK, ndofVhKaux);
+    for(int i = 0 ; i < ndofLambdaK; i++){
+        for(int j = 0; j < ThlambdaHK.m; j++){
+            ThlambdaHK(i,j) = ThlambdaH(k*ndofLambdaK + i, j);
+        }
+    }
+
+//------------------Constructing T_h lambda_H^K------------------------------------//
+
+    real[int] sumThlambdaHK(ndofVhKaux);
+    for(int i = 0; i < ndofLambdaK; i++){
+        int ii = LocationMatrix(k,i);
+        real[int] aux = lambdaH[][ii] * ThlambdaHK(i,:);
+        sumThlambdaHK = sumThlambdaHK + aux;
+    }
+
+//------------------Constructing \hat{T}_h f^K------------------------------------//
+
+    real[int] ThhatfK = EtaF(k,:);
+
+
+//------------------Constructing uHh^K = \hat{T}_h f^K + T_h lambda_H^K------------------------------------//
+
+    real[int] uHhK(ndofVhKaux);
+    for(int i = 0; i < ndofVhKaux; i++){
+        uHhK[i] = ThhatfK(i) + sumThlambdaHK(i);
+    }
+
+    VhKaux auxuHhK;
+    auxuHhK[] = uHhK;
+    //plot(auxuHhK, Th[k], ps=fileparaviewPrimal+"/uHhK"+k+".eps", wait=true);
+    uHhg(k,:) = auxuHhK[];
+
+//------------------Computing the error------------------------------------//
+    
+    L2error[k] = int2d(Th[k])((uex - auxuHhK)^2);
+    H1semierror[k] = int2d(Th[k])((dx(auxuHhK)- dxu)^2 +(dy(auxuHhK) - dyu)^2);
+    H1error[k] = L2error[k] + H1semierror[k];
+
+    globalSumL2 = globalSumL2 + L2error[k];
+    globalSumH1 = globalSumH1 + H1error[k];
+    globalSumH1semi = globalSumH1semi + H1semierror[k];
+
+//-----------------Saving solutions for visualization---------------------------------------------//
+
+//Activate this part of the code to save the local results
+
+// Save as praview file
+    //int[int] Order = [1];
+    //string DataName = "uHh";
+    //savevtk(fileparaviewPrimal+"/uh_"+k+"_globalMesh"+coarseMesh+"_subMesh"+subMesh+"_Lk"+LkOrder+"_Pk"+PkOrder+".vtu", Th[k], auxuHhK, dataname=DataName, order=Order);
+    //savevtk("paraview/kappa_"+K+"_globalMesh"+coarseMesh+"_subMesh"+subMesh+"_Lk"+LkOrder+"_Pk"+PkOrder+".vtu", Th[K], kappa(), dataname=DataName, order=Order);
+
+
+}
+
+//mesh size
+//mesh Th0 = Th[0];
+//real hSubMesh = Th0.hmax;
+
+// Printing 
+//cout << "uHh = min " << uHhg.min << " max=" << uHhg.max << endl;
+//cout << "h = " << hSubMesh << endl;
+
+cout << "Global Error for uHh" << "\n";
+cout << "L2 error: " <<globalSumL2<< endl;
+cout << "H1 Semi: " <<globalSumH1semi<< endl;
+cout << "H1 error: " <<globalSumH1<< endl;
+
+// Save errors and mesh size
+        errorData << Hcal << " " << sqrt(globalSumL2) 
+        << " " << sqrt(globalSumH1semi) << " " 
+        << sqrt(globalSumH1) << endl;
+
+}
