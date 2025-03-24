@@ -1,0 +1,122 @@
+/*
+USFEM Method with P1 for the advective-reactive-diffusive equation
+with homogeneus Dirichlet conditions
+*/ 
+load "iovtk" //export vtk files
+
+int forder = 10; // Order of quadrature rule
+
+//Model parameters
+real alpha1 = 3.0/5.0; //Convection vector
+real alpha2 = 4.0/5.0;
+real sigma = 1.0;           //Reaction
+real nu = 10e-4;        //Diffussion
+real L = 1.0; // Length of the square side
+
+//Source function
+func f = 0.0;
+
+//Test with exact solution
+
+/*
+func f = (sigma + nu * (3^2 * pi^2 + 3^2 * pi^2) )*cos(3*pi*x)*cos(3*pi*y);
+func uEx = cos(3*pi*x)*cos(3*pi*y);
+func dxu = -3*pi*sin(3*pi*x)*cos(3*pi*y);
+func dyu = -3*pi*cos(3*pi*x)*sin(3*pi*y);
+*/
+
+// Output file for error data
+/*ofstream errorData("error_data_Unusual.txt");
+errorData << "# h   L2_error   H1_semi_error   H1_error" << endl;*/
+
+/*Note: Loop over the number of elements*/
+
+//for(int n=1; n<=500; n = 2*n){
+    int n = 20;
+    mesh Th = square(n, n, [x*L, y*L]); // nxn square mesh
+
+    // Plot the mesh with boundary labels
+    //plot(Th, wait=true, fill=true, cmm="Mesh with boundary labels", nbiso=1, boundary=1);
+
+    //Functional spaces
+    fespace Vh(Th, P1);              // P2 finite element space
+    Vh u, v;                       // Unknown and test functions
+
+    //Parameters
+    real h = L/n;
+
+    //USFEM parameters
+    real normConvection = (alpha1^4 + alpha2^4)^(1.0/4.0);
+    real hK = sqrt(0.5)*h;       // Size of each triangle
+    real Ck = 1.0 / 3.0;       // Constant C_k (Verify other estimative)
+    real mk = min(1.0/3.0 , Ck);    // Constant m_k
+    real Pe1 = (2 * nu) / (mk * sigma * hK^2); 
+    /*Pe1=(2 * nu) / (mk * sigma * hK^2)
+    the sigma in the denominator is changed by one, just to avoid
+    division by 0*/
+    real Pe2 = (mk*normConvection*hK)/nu;
+
+    func real Csi(real x) {
+        return (x < 1) ? 1 : x;
+    }
+    
+    real tau = hK^2 / ( sigma * hK^2 * Csi(Pe1) + (2 * nu/mk)*Csi(Pe2) ) ; //Stabilization parameter
+
+    //cout << "tau = " << tau << endl;
+    //tau = 0.0;
+
+    //Variational formulation
+
+    varf a(u, v) = int2d(Th, qforder=forder)(sigma*u*v 
+                + (alpha1*dx(u) + alpha2*dy(u))*v 
+                + nu*(dx(u)*dx(v) + dy(u)*dy(v)) )
+                - int2d(Th, qforder=forder)( tau*( sigma*u + alpha1*dx(u) + alpha2*dy(u) - nu*( dxx(u) + dyy(u) ) )*( sigma*v - ( alpha1*dx(v) + alpha2*dy(v) ) - nu*( dxx(v) + dyy(v) ) ))
+                + on(1, u = 0.0) 
+                + on(4, u = 1.0) 
+                + on(2, u = 0.0) 
+                + on(3, u = 1.0);
+
+    varf linform(unused, v) =
+        int2d(Th, qforder=forder)(f*v)
+        - int2d(Th, qforder=forder)(f*tau*(sigma*v - ( alpha1*dx(v) + alpha2*dy(v) )- nu*(dxx(v) + dyy(v))))
+        + on(1, unused = 0.0) 
+        + on(4, unused = 1.0) 
+        + on(2, unused = 0.0) 
+        + on(3, unused = 1.0);
+
+    //Linear system
+
+    matrix A = a(Vh, Vh);
+    Vh F;
+    F[] = linform(0, Vh);
+    u[] = A^-1 * F[];
+
+    plot(u, wait=true, fill=true, value=true);
+
+    //Export  the triangles with its heights
+
+    ofstream out("mesh_solution.dat");
+    for (int i = 0; i < Th.nt; i++) { 
+        for (int j = 0; j < 3; j++) { 
+            int vert = Th[i][j]; 
+            out << Th(vert).x << " " << Th(vert).y << " " << u[][vert] << endl;
+        }
+        out << endl; 
+    }
+
+    //Comparation with the exact solution
+    /*
+    real L2error = int2d(Th, qforder = forder)((uEx - u)^2);
+    real H1semierror = int2d(Th, qforder = forder)((dx(u)- dxu)^2 +(dy(u) - dyu)^2);
+    real H1error = L2error + H1semierror;
+
+    // Save errors and mesh size
+    errorData << h << " " << sqrt(L2error) 
+    << " " << sqrt(H1semierror) << " " 
+    << sqrt(H1error) << endl;
+    */
+//}
+
+//Solution to paraview
+savevtk("solution_unusual.vtk", Th, u, dataname="u");
+
